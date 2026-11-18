@@ -602,6 +602,7 @@ const fileUrl = p => {
   return signed[p] || `${CONFIG.SUPABASE_URL}/storage/v1/object/public/tw-files/${p}`;
 };
 async function cacheAttachment(f) {
+  try { if (localStorage.getItem(fileCacheKey(f.path)) === '1') return true; } catch (e) {}
   if (!('caches' in window) || !navigator.onLine || !signed[f.path]) return false;
   try {
     const response = await fetch(signed[f.path], { cache: 'no-store' });
@@ -620,15 +621,12 @@ document.addEventListener('load', e => {
   const img = e.target?.closest?.('img[data-file-cache]');
   if (img) cachedFileOpened(decodeURIComponent(img.dataset.fileCache));
 }, true);
-document.addEventListener('click', async e => {
+document.addEventListener('click', e => {
   const a = e.target.closest('a[data-file-cache]');
   if (!a) return;
   const path = decodeURIComponent(a.dataset.fileCache || '');
   const f = state.tw_files.find(x => x.path === path);
-  if (!f) return;
-  e.preventDefault();
-  if (await cacheAttachment(f)) window.open(offlineFileUrl(path), '_blank', 'noopener');
-  else window.open(fileUrl(path), '_blank', 'noopener');
+  if (f) cacheAttachment(f); // 保留瀏覽器原生開啟行為，避免 iOS 阻擋非同步 window.open
 });
 async function signFiles() {
   if (!sb) return;
