@@ -998,3 +998,299 @@ const getJSON = async (u, ms = 0) => {
 };
 const wxCache = k => { try { return JSON.parse(localStorage.getItem('tw:wx3:' + k) || 'null'); } catch (e) { return null; } };
 async function geoCity(name) {
+  const k = 'tw:geoc3:' + name, c = localStorage.getItem(k); if (c) return JSON.parse(c);
+  const q = encodeURIComponent(name), cjk = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(name);
+  const om = getJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&format=json&name=' + q, 5000).then(j => { const r = j.results?.[0]; if (!r) throw 0; return { lat: r.latitude, lon: r.longitude, label: [r.name, r.admin1, r.country].filter(Boolean).join('、') }; });
+  const nm = getJSON('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=zh-TW&q=' + q, 6000).then(j => {
+    if (!j[0]) throw 0;
+    const ps = String(j[0].display_name || '').split(',').map(x => x.trim()).filter(x => x && !/^\d[\d-]*$/.test(x));
+    const lb = ps.length > 2 ? [ps[0], ps[ps.length - 2], ps[ps.length - 1]] : ps;
+    return { lat: +j[0].lat, lon: +j[0].lon, label: lb.join('、') };
+  });
+  om.catch(() => {}); nm.catch(() => {});
+  let v = null;
+  try { v = cjk ? await nm.catch(() => om) : await Promise.any([om, nm]); } catch (e) {}   // 中文地名以 OpenStreetMap 為準（較準），英文兩邊搶快
+  if (v) localStorage.setItem(k, JSON.stringify(v));
+  return v;
+}
+async function fetchWeather(key) {
+  const g = key[0] === '@' ? (([lat, lon]) => ({ lat, lon }))(key.slice(1).split(',').map(Number)) : await geoCity(key);
+  if (!g) throw new Error('nogeo');
+  const j = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${g.lat}&longitude=${g.lon}&timezone=auto&forecast_days=16&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max`, 10000);
+  const data = { label: g.label || '', now: j.current ? { temp: j.current.temperature_2m, code: j.current.weather_code } : null,
+    rows: j.daily.time.map((d, i) => ({ d, code: j.daily.weather_code[i], hi: j.daily.temperature_2m_max[i], lo: j.daily.temperature_2m_min[i], pop: j.daily.precipitation_probability_max[i] })) };
+  try { localStorage.setItem('tw:wx3:' + key, JSON.stringify({ t: Date.now(), data })); } catch (e) {}
+  return data;
+}
+async function ensureWeather() {
+  const t = curTrip(), key = wxKey(t);
+  if (!key || wx.key === key || wx.loading) return;
+  const c = wxCache(key), fresh = c && Date.now() - c.t < 3600e3;      // 有舊資料就先顯示，背景再更新
+  wx = c ? { key, rows: c.data.rows, now: c.data.now, label: c.data.label, msg: fresh ? '' : '更新中…', loading: !fresh }
+         : { key, rows: [], now: null, msg: '天氣載入中…', loading: true };
+  render(); if (fresh) return;
+  try {
+    const d = await fetchWeather(key);
+    if (key !== wxKey(curTrip())) { wx = { key: '', rows: [], now: null, msg: '', loading: false }; return render(); }
+    wx = { key, rows: d.rows, now: d.now, label: d.label, msg: '', loading: false };
+  } catch (e) {
+    wx = { key, rows: c?.data.rows || [], now: c?.data.now || null, label: c?.data.label, msg: e.message === 'nogeo' ? '找不到這個地點，請換個名稱試試（城市名或知名地標）' : '天氣暫時無法取得' + (c ? '，顯示上次的資料' : ''), loading: false };
+  }
+  render();
+}
+function wxUseLive() {                                  // 即時位置：只在這支手機顯示，不會改動旅程的天氣地點
+  if (!navigator.geolocation) return toast('這個瀏覽器不支援定位');
+  toast('定位中…');
+  navigator.geolocation.getCurrentPosition(p => {
+    const lat = p.coords.latitude, lon = p.coords.longitude;
+    wxLive = { lat, lon, name: '' }; wxEdit = false; wx = { key: '', rows: [], now: null, msg: '', loading: false }; render();
+    getJSON(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=10&accept-language=zh-TW&lat=${lat}&lon=${lon}`, 4000).then(j => {
+      const a = j.address || {}, n = a.city || a.town || a.county || a.state || '';
+      if (n && wxLive && wxLive.lat === lat) { wxLive.name = n; if (!wxEdit) render(); }
+    }).catch(() => {});
+  }, err => toast(err.code === 1 ? '沒有定位權限，請到手機或瀏覽器設定允許位置' : '定位失敗，請稍後再試'), { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+}
+
+async function joinTrip() {
+  const v = (prompt('貼上旅程連結，或輸入旅程代碼') || '').trim(); if (!v) return;
+  let code = v; try { code = new URL(v).searchParams.get('trip') || v; } catch (e) {}
+  if (!sb) return toast('需要連線雲端才能加入旅程');
+  await ready;
+  const r = await sb.rpc('join_trip', { p_code: code });
+  if (r.data) location.search = '?trip=' + encodeURIComponent(code); else toast(r.error ? '加入失敗，請稍後再試' : '找不到這個旅程代碼');
+}
+const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+function tripDays() {          // 旅程出發日～回程日自動展開，再加上行程裡出現過的日期
+  const t = curTrip(), set = new Set(state.itinerary.map(r => r.day).filter(Boolean));
+  if (t?.start_day) {
+    const end = t.end_day && t.end_day >= t.start_day ? t.end_day : t.start_day;
+    const d = new Date(t.start_day + 'T00:00'), e = new Date(end + 'T00:00');
+    for (let i = 0; i < 60 && d <= e; i++) { set.add(ymd(d)); d.setDate(d.getDate() + 1); }
+  }
+  return [...set].sort();
+}
+
+const views = {
+  home() {
+    const rows = [...trips].sort((a, b) => (a.start_day || '9').localeCompare(b.start_day || '9'));
+    return `<div class="hero big">${scene('big')}<div class="hl"><h1>旅行手帳</h1><p>今天，要去哪裡呢？</p></div></div><div class="catbar"><button class="mini" data-join>🔗 用代碼或連結加入旅程</button></div>` +
+      (rows.length ? rows.map((t, i) => `<div class="trip" style="--i:${i + 1}" data-go="${esc(t.id)}">${art(t.id)}<span class="badge">${countdown(t) || '尚未排日期'}</span><button class="ed" data-edit="tw_trips:${esc(t.id)}" aria-label="編輯">✎</button>
+        <div class="tb"><strong>${esc(t.name)}</strong><div class="sub">${range(t)}</div></div></div>`).join('')
+        : `<div class="empty">還沒有旅程，按右下角出發吧。</div>`) + `<div class="ver">${verLine()}</div>` + add('tw_trips');
+  },
+  itinerary() {
+    const days = tripDays(), undated = state.itinerary.some(r => !r.day);
+    const tabs = undated ? [...days, ''] : days;
+    if (!tabs.length) return `<div class="empty">先到首頁編輯這趟旅程，設定出發日與回程日，行程日期就會自動建立。</div>` + add('itinerary');
+    if (!tabs.includes(selDay)) { const today = ymd(new Date()); selDay = tabs.includes(today) ? today : tabs[0]; }
+    const t0 = curTrip()?.start_day;
+    const chips = tabs.map(d => {
+      const n = d && t0 ? Math.round((new Date(d + 'T00:00') - new Date(t0 + 'T00:00')) / 864e5) + 1 : 0;
+      return `<button class="dchip ${d === selDay ? 'on' : ''}" data-day="${d}"><b>${d ? (n >= 1 ? 'D' + n : '其他') : '未排'}</b><span>${d ? d.slice(5).replace('-', '/') : '日期'}</span></button>`;
+    }).join('');
+    const rows = dayRows();
+    let h = '';
+    rows.forEach((r, i) => {
+      const prev = i ? rows[i - 1] : null;
+      if (prev) h += legHtml(r, prev);
+      if (i) { const pe = endMin(rows[i - 1]), st = toMin(r.time); if (pe != null && st != null && st > pe) h += gapHtml(Math.min(48, Math.round((st - pe) / 60 * 16))); }
+      h += itemHtml(r, i, rows.length);
+    });
+    return `<div class="days">${chips}</div><h2>${fmtDay(selDay)}</h2>` + (h ? `<ul class="tl">${h}</ul>` : `<div class="empty small">這天還沒有安排，按右下角新增。</div>`) + (rows.length || !h ? '' : `<div class="empty small">按右下角新增第一個行程。</div>`) + add('itinerary');
+  },
+  legCard(leg, title) {
+    const fl = state.flights.filter(f => (f.leg || 'out') === leg).sort((a, b) => (a.dep_time || a.flight_date || '').localeCompare(b.dep_time || b.flight_date || ''));
+    return `<div class="inleg"><div class="ilh"><b>${title}</b><button class="mini" data-add="flights" data-leg="${leg}">＋ 航班</button></div>` +
+      (fl.length ? fl.map(f => `<div class="fl" data-edit="flights:${f.id}"><div class="route">${esc(apZh(f.dep_airport) || '—')}<span>✈</span>${esc(apZh(f.arr_airport) || '—')}</div>
+        <div class="sub">${esc(f.flight_no || '')}${f.flight_date ? ' · ' + fmtDay(f.flight_date) : ''}${f.booking_ref ? ' · 訂位 ' + esc(f.booking_ref) : ''}</div>
+        <div class="sub">${fmtDT(f.dep_time)} → ${fmtDT(f.arr_time)}</div>${f.note ? `<p class="note">${esc(f.note)}</p>` : ''}</div>`).join('') : `<div class="empty small">還沒有${title}航班</div>`) + `</div>`;
+  },
+  weather() {
+    const t = curTrip(), live = !!wxLive, place = live ? '' : t?.weather_place, ok = wx.key === wxKey(t);
+    const inTrip = d => t?.start_day && d >= t.start_day && d <= (t.end_day || t.start_day), today = ymd(new Date());
+    let b = ((!place && !live) || wxEdit) ? `<div class="wxset"><input id="wxplace" placeholder="輸入地點，例如：札幌、Sapporo" value="${esc(place || t?.weather_place || '')}"><button class="mini" data-wxsave>查詢</button><button class="mini" data-wxlive>📍 即時位置</button></div>`
+      : `<div class="wxbar"><span class="sub">📍 ${live ? esc(wxLive.name || '目前位置') + '（即時位置）' : esc(place)}</span><button class="mini" data-wxedit>更改地點</button><button class="mini" data-wxlive>📍 即時位置</button>${live && t?.weather_place ? '<button class="mini" data-wxback>回旅程地點</button>' : ''}</div>`;
+    if ((place || live) && ok) {
+      if (!live && wx.label) b += `<div class="sub">定位到：${esc(wx.label)}（不對的話請換更明確的名稱，例如加上國家）</div>`;
+      if (wx.msg) b += `<div class="sub">${esc(wx.msg)}</div>`;
+      if (wx.now) b += `<div class="wxnow">${WX(wx.now.code)} <b>現在 ${Math.round(wx.now.temp)}°</b></div>`;
+      if (wx.rows.length) {
+        b += `<div class="wxrow">${wx.rows.map(r => `<div class="wxd ${inTrip(r.d) ? 'trip' : ''}"><div class="sub">${r.d === today ? '今天' : new Date(r.d + 'T00:00').toLocaleDateString('zh-TW', { month: 'numeric', day: 'numeric' })}</div><div class="wxi">${WX(r.code)}</div><div><b>${Math.round(r.hi)}°</b> <span class="sub">${Math.round(r.lo)}°</span></div><div class="sub">💧${r.pop ?? '–'}%</div></div>`).join('')}</div>`;
+        if (t?.start_day) b += `<div class="sub">${wx.rows.some(r => inTrip(r.d)) ? '黃色底是旅程日期。' : '旅程日期還在預報範圍（未來 16 天）之外，先顯示目前的預報。'}</div>`;
+      }
+    }
+    return `<div class="legcard"><h2>🌤 天氣預報</h2>${b}</div>`;
+  },
+  trip() {
+    const lg = [...state.lodging].sort((a, b) => (a.check_in || '').localeCompare(b.check_in || ''));
+    const lodging = lg.length ? lg.map(l => { const n = l.check_in && l.check_out ? Math.round((new Date(l.check_out) - new Date(l.check_in)) / 864e5) : 0;
+      return `<div class="row blk" data-edit="lodging:${l.id}"><strong>${esc(l.name)}</strong>
+        <div class="sub">${l.check_in ? fmtDay(l.check_in) : '—'} → ${l.check_out ? fmtDay(l.check_out) : '—'}${n ? `（${n} 晚）` : ''}</div>
+        ${l.address ? `<div class="sub"><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(l.address)}" target="_blank" rel="noopener">${esc(l.address)}</a></div>` : ''}
+        <div class="sub">${l.booking_ref ? '訂房編號 ' + esc(l.booking_ref) + ' ' : ''}${link(l.url)}</div>${l.note ? `<p class="note">${esc(l.note)}</p>` : ''}</div>`; }).join('') : `<div class="empty small">還沒有住宿</div>`;
+    const rem = state.reminders.length ? state.reminders.map(r => `<div class="row blk" data-edit="reminders:${r.id}"><strong>⚠ ${esc(r.title)}</strong>${r.note ? `<p class="note">${esc(r.note)}</p>` : ''}</div>`).join('') : `<div class="empty small">還沒有提醒，把不能忘的事記在這裡。</div>`;
+    return `<div class="legcard"><h2>✈ 航班資訊</h2>${views.legCard('out', '去程')}${views.legCard('in', '回程')}</div>` + views.weather() +
+      `<div class="legcard"><h2>🏨 住宿資訊<button class="mini" data-add="lodging">＋ 新增</button></h2>${lodging}</div>` +
+      `<div class="legcard"><h2>📌 重要提醒<button class="mini" data-add="reminders">＋ 新增</button></h2>${rem}</div>`;
+  },
+  info() {
+    const chips = SUBS.map(([k, v]) => `<button class="dchip ${k === infoTab ? 'on' : ''}" data-sub="${k}"><span>${v}</span></button>`).join('');
+    return `<div class="days">${chips}</div>` + (infoTab === 'docs' ? views.vouchers() : '') + (infoTab === 'restaurants' ? views.restaurants() : infoTab === 'notes' ? views.notes() : views.checklist(infoTab));
+  },
+  restaurants() {
+    const cats = state.check_cats.filter(c => c.kind === 'restaurants'), rs = state.restaurants;
+    const card = r => `<div class="row blk" data-edit="restaurants:${r.id}"><strong>${esc(r.name)}</strong>${/^https?:\/\//.test(r.map_url || '') ? ` <a href="${esc(r.map_url)}" target="_blank" rel="noopener">📍 地圖</a>` : ''}
+      ${r.note ? `<p class="note">${esc(r.note)}</p>` : ''}${filesView(r.id)}</div>`;
+    const loose = rs.filter(r => !cats.some(c => c.id === r.cat_id));
+    const ids = cats.map(c => c.id).concat(cats.length && loose.length ? ['loose'] : []), anyOpen = ids.some(i => !folded.has(i));
+    let h = `<div class="catbar">${cats.length ? `<button class="mini" data-foldall="${ids.join(',')}">${anyOpen ? '全部收合' : '全部展開'}</button>` : '<button class="mini" data-preset="restaurants">加入建議類別</button>'}<button class="mini" data-add="check_cats">＋ 新增類別</button></div>`;
+    if (!rs.length && !cats.length) h += `<div class="empty">還沒有餐廳，貼上 Google 地圖連結就能新增。</div>`;
+    h += cats.map(c => {
+      const its = rs.filter(r => r.cat_id === c.id), open = !folded.has(c.id);
+      return `<h3 class="cat"><span class="ct" data-fold="${c.id}"><i>${open ? '▾' : '▸'}</i>${esc(c.name)} <small>${its.length}</small></span><span><button class="mini" data-add="restaurants" data-cat="${c.id}">＋ 餐廳</button> <button class="mini" data-edit="check_cats:${c.id}">✎</button></span></h3>` +
+        (open ? (its.map(card).join('') || `<div class="empty small">這個類別還沒有餐廳</div>`) : '');
+    }).join('');
+    if (loose.length) {
+      const open = !folded.has('loose');
+      h += (cats.length ? `<h3 class="cat"><span class="ct" data-fold="loose"><i>${open ? '▾' : '▸'}</i>未分類 <small>${loose.length}</small></span></h3>` : '') + (open || !cats.length ? loose.map(card).join('') : '');
+    }
+    return h + add('restaurants');
+  },
+  vouchers() {
+    const vs = state.check_items.filter(i => i.kind === 'voucher'), open = !folded.has('vouchers');
+    const card = i => `<div class="row blk vcard" data-edit="check_items:${i.id}"><div class="vi">${i.qr_img ? `<img src="${esc(i.qr_img)}" alt="">` : '🎫'}</div><div class="vt"><strong>${esc(i.title)}</strong>${i.note ? `<div class="note">${esc(i.note)}</div>` : ''}${i.qr_img ? '' : '<div class="sub">未偵測到 QR，顯示原圖</div>'}</div><button type="button" class="vbtn" data-qrshow="${i.id}">開啟 QR</button></div>`;
+    return `<h3 class="cat"><span class="ct" data-fold="vouchers"><i>${open ? '▾' : '▸'}</i>🎫 憑證 <small>${vs.length}</small></span><span><button class="mini" data-qrpick="cam">📷 拍照掃描</button> <button class="mini" data-qrpick="up">🖼 上傳</button></span></h3>
+      <input type="file" id="qr-cam" data-qrfile accept="image/*" capture="environment" hidden><input type="file" id="qr-up" data-qrfile accept="image/*,application/pdf" hidden>` +
+      (open ? (vs.map(card).join('') || '<div class="empty small">拍下或上傳有 QR Code 的票券、憑證（照片或 PDF），之後一鍵出示。</div>') : '');
+  },
+  checklist(kind) {
+    const cats = state.check_cats.filter(c => c.kind === kind), items = state.check_items.filter(i => i.kind === kind);
+    if (!cats.length) return `<div class="empty">還沒有類別，先新增一個類別再加項目。</div><div style="text-align:center"><button class="mini" data-preset="${kind}">加入建議類別</button></div>` + add('check_cats');
+    const ids = cats.map(c => c.id), anyOpen = ids.some(i => !folded.has(i));
+    return `<div class="meta">已完成 ${items.filter(i => i.done).length} / ${items.length}<button class="mini" style="float:right" data-foldall="${ids.join(',')}">${anyOpen ? '全部收合' : '全部展開'}</button></div>` + cats.map(c => {
+      const its = items.filter(i => i.cat_id === c.id), open = !folded.has(c.id);
+      return `<h3 class="cat"><span class="ct" data-fold="${c.id}"><i>${open ? '▾' : '▸'}</i>${esc(c.name)} <small>${its.filter(i => i.done).length}/${its.length}</small></span><span><button class="mini" data-add="check_items" data-cat="${c.id}">＋ 項目</button> <button class="mini" data-edit="check_cats:${c.id}">✎</button></span></h3>` +
+        (open ? its.map(i => `<div class="row item ${i.done ? 'done' : ''}"><input type="checkbox" class="cb" data-toggle="${i.id}" ${i.done ? 'checked' : ''} aria-label="完成"><div class="tt" data-edit="check_items:${i.id}"><strong>${esc(i.title)}</strong>${i.note ? `<div class="note">${esc(i.note)}</div>` : ''}${filesView(i.id)}</div></div>`).join('') : '');
+    }).join('') + add('check_cats');
+  },
+  notes() {
+    if (!state.info.length) return `<div class="empty">其他想記下來的資料放這裡。</div>` + add('info');
+    const cats = [...new Set(state.info.map(r => r.category || '其他'))];
+    return cats.map(c => {
+      const its = state.info.filter(r => (r.category || '其他') === c), k = 'n:' + c, open = !folded.has(k);
+      return `<h3 class="cat"><span class="ct" data-fold="${esc(k)}"><i>${open ? '▾' : '▸'}</i>${esc(c)} <small>${its.length}</small></span></h3>` +
+        (open ? its.map(r => `<div class="row blk" data-edit="info:${r.id}"><strong>${esc(r.title)}</strong>${r.content ? `<p class="note">${esc(r.content)}</p>` : ''}</div>`).join('') : '');
+    }).join('') + add('info');
+  },
+  members() {
+    return (state.members.length ? state.members.map(m => `<div class="row" data-edit="members:${m.id}"><strong>${esc(m.name)}</strong></div>`).join('')
+      : `<div class="empty">先新增旅伴，記帳分帳才能使用。</div>`) + add('members');
+  },
+  money() {
+    const ex = [...state.expenses].sort((a, b) => (b.day || '').localeCompare(a.day || ''));
+    if (!ex.length) return `<div class="empty">還沒有支出。${state.members.length ? '' : '請先到「成員」新增旅伴。'}</div>` + add('expenses');
+    const bal = {}; state.members.forEach(m => bal[m.id] = { paid: 0, share: 0 });
+    ex.forEach(e => {
+      const t = twd(e), ids = (e.split?.length ? e.split : state.members.map(m => m.id)).filter(i => bal[i]);
+      const ps = payersOf(e).filter(i => bal[i]); ps.forEach(i => bal[i].paid += t / ps.length);
+      ids.forEach(i => bal[i].share += t / ids.length);
+    });
+    const net = state.members.map(m => ({ id: m.id, v: bal[m.id].paid - bal[m.id].share }));
+    const cr = net.filter(x => x.v > 0.5).map(x => ({ ...x })).sort((a, b) => b.v - a.v);
+    const db = net.filter(x => x.v < -0.5).map(x => ({ id: x.id, v: -x.v })).sort((a, b) => b.v - a.v);
+    const pay = []; let i = 0, j = 0;
+    while (i < db.length && j < cr.length) {
+      const a = Math.min(db[i].v, cr[j].v); pay.push([db[i].id, cr[j].id, a]);
+      db[i].v -= a; cr[j].v -= a; if (db[i].v < 0.5) i++; if (cr[j].v < 0.5) j++;
+    }
+    return `<div class="sub">總支出（台幣）</div><div class="total">${nt(ex.reduce((s, e) => s + twd(e), 0))}</div>${catStats(ex)}
+      <h3>每人結算</h3><table><tr><th></th><th>已付</th><th>應分攤</th><th>差額</th></tr>
+      ${state.members.map(m => { const b = bal[m.id], n = b.paid - b.share; return `<tr><td>${esc(m.name)}</td><td>${Math.round(b.paid).toLocaleString()}</td><td>${Math.round(b.share).toLocaleString()}</td><td class="${n >= 0 ? 'pos' : 'neg'}">${n >= 0 ? '+' : ''}${Math.round(n).toLocaleString()}</td></tr>`; }).join('')}</table>
+      <h3>建議還款</h3>${pay.length ? pay.map(p => `<div class="row"><span>${esc(mname(p[0]))} → ${esc(mname(p[1]))}</span><span class="amt">${nt(p[2])}</span></div>`).join('') : '<div class="sub">目前沒有需要還款的人。</div>'}
+      <h3>支出紀錄</h3>${ex.map(e => `<div class="row" data-edit="expenses:${e.id}"><div><strong>${esc(e.title)}</strong><div class="sub">${e.category ? `<span class="tag">${esc(e.category)}</span> ` : ''}${e.pay_method ? `<span class="tag">${esc(e.pay_method)}</span> ` : ''}${fmtDay(e.day)} · ${esc(payNames(e))} 付 · ${(e.split?.length || state.members.length)} 人分攤</div>${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}</div>
+        <div class="amt">${Number(e.amount).toLocaleString()} ${esc(e.currency)}${e.currency !== 'TWD' ? `<div class="sub">≈ ${nt(twd(e))}</div>` : ''}</div></div>`).join('')}` + add('expenses');
+  }
+};
+
+let fresh = true;
+function render() {
+  document.body.className = TRIP ? '' : 'home';
+  $('#back').hidden = $('#share').hidden = !TRIP;
+  const t = curTrip();
+  applyPalette(TRIP ? paletteOf(t) : 'default');
+  $('#ttl').textContent = TRIP ? (t?.name || '旅程') : '旅行手帳';
+  document.title = TRIP ? (t?.name || '旅程') + ' · 旅行手帳' : '旅行手帳';
+  $('#tabs').innerHTML = TRIP ? Object.entries(TABS).map(([k, v]) => `<button data-tab="${k}" class="${k === tab ? 'on' : ''}">${v}</button>`).join('') : '';
+  const head = TRIP ? (tab === 'trip' ? homeHero(t) : `<div class="hero">${scene('small')}</div>${t ? `<div class="meta">${range(t)} ${countdown(t) ? '· ' + countdown(t) : ''}</div>` : ''}`) : '';
+  const v = $('#view');
+  v.className = (fresh ? 'in' : '') + (openLeg ? ' leglock' : '');
+  v.innerHTML = head + (TRIP ? views[tab]() : views.home());
+  fresh = false;
+  $('.dchip.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  { const c = $('.wxrow'), e = $('.wxd.trip'); if (c && e) c.scrollLeft = e.offsetLeft - c.offsetLeft - 8; }
+  if (TRIP && tab === 'trip') ensureWeather();
+}
+document.addEventListener('click', e => {
+  if (e.target.closest('a')) return;
+  const el = e.target.closest('[data-tab],[data-add],[data-edit],[data-go],[data-day],[data-sub],[data-preset],[data-rmfile],[data-trans],[data-tsave],[data-tcancel],[data-fold],[data-foldall],[data-qrpick],[data-qrshow],[data-qrclose],[data-mv],[data-rmit],[data-wxsave],[data-wxedit],[data-wxlive],[data-wxback],[data-catpick],[data-join]'); if (!el) return;
+  if (el.dataset.go) location.search = '?trip=' + encodeURIComponent(el.dataset.go);
+  else if ('day' in el.dataset) { selDay = el.dataset.day; openLeg = null; render(); }
+  else if (el.dataset.sub) { infoTab = el.dataset.sub; render(); }
+  else if (el.dataset.preset) addPreset(el.dataset.preset);
+  else if (el.dataset.rmfile) rmFile(el.dataset.rmfile);
+  else if (el.dataset.trans) toggleLeg(el.dataset.trans);
+  else if ('wxsave' in el.dataset) { if (!canEdit()) return toast('離線中，目前只能查看'); const v = ($('#wxplace')?.value || '').trim(); if (!curTrip()) return toast('找不到這趟旅程'); wxEdit = false; wxLive = null; wx = { key: '', rows: [], now: null, msg: '', loading: false }; saveRow('tw_trips', { ...curTrip(), weather_place: v || null }); }
+  else if ('join' in el.dataset) joinTrip();
+  else if ('qrpick' in el.dataset) { if (!canEdit()) return toast('離線中，目前只能查看'); $('#qr-' + el.dataset.qrpick)?.click(); }
+  else if ('qrshow' in el.dataset) showQR(el.dataset.qrshow);
+  else if ('qrclose' in el.dataset) closeQR();
+  else if ('mv' in el.dataset) moveIt(el.dataset.mv, +el.dataset.dir);
+  else if ('rmit' in el.dataset) { if (!canEdit()) return toast('離線中，目前只能查看'); if (confirm('確定刪除這個行程？')) delRow('itinerary', el.dataset.rmit); }
+  else if ('wxedit' in el.dataset) { wxEdit = true; render(); }
+  else if ('wxlive' in el.dataset) wxUseLive();
+  else if ('wxback' in el.dataset) { wxLive = null; wxEdit = false; wx = { key: '', rows: [], now: null, msg: '', loading: false }; render(); }
+  else if ('catpick' in el.dataset) { const i = $('[name=category]'); if (i) i.value = el.dataset.catpick; }
+  else if ('tsave' in el.dataset) saveLeg(el.dataset.tsave);
+  else if ('tcancel' in el.dataset) { openLeg = null; render(); }
+  else if (el.dataset.fold) { const k = el.dataset.fold; folded.has(k) ? folded.delete(k) : folded.add(k); foldSave(); render(); }
+  else if (el.dataset.foldall) { const ids = el.dataset.foldall.split(','), anyOpen = ids.some(i => !folded.has(i)); ids.forEach(i => anyOpen ? folded.add(i) : folded.delete(i)); foldSave(); render(); }
+  else if (el.dataset.tab) { tab = el.dataset.tab; openLeg = null; fresh = true; render(); scrollTo(0, 0); }
+  else if (el.dataset.add) {
+    const ex = {}; if (el.dataset.cat) ex.cat_id = el.dataset.cat; if (el.dataset.leg) ex.leg = el.dataset.leg;
+    if (el.dataset.add === 'check_items' || el.dataset.add === 'check_cats') ex.kind = infoTab;
+    openForm(el.dataset.add, null, ex);
+  }
+  else { const [t, id] = el.dataset.edit.split(':'); openForm(t, id); }
+});
+document.addEventListener('change', e => {
+  const sel = e.target.closest('.lpanel [name=mode]');
+  if (sel) {
+    const pn = sel.closest('.lpanel'), r = state.itinerary.find(x => x.id === pn.dataset.lp), rows = dayRows();
+    pn.querySelector('[data-gmap]').href = gmapUrl(sel.value, rawPlace(prevOf(r.id)), rawPlace(r)); return;
+  }
+  const el = e.target.closest('[data-toggle]'); if (!el) return;
+  const r = state.check_items.find(x => x.id === el.dataset.toggle); if (!r) return;
+  if (!canEdit()) { el.checked = !el.checked; return toast('離線中，目前只能查看'); }
+  saveRow('check_items', { ...r, done: el.checked });
+});
+$('#dlg').addEventListener('close', () => applyPalette(TRIP ? paletteOf(curTrip()) : 'default'));
+$('#back').onclick = () => { location.href = location.pathname; };
+$('#share').onclick = async () => {
+  const url = location.origin + location.pathname + '?trip=' + encodeURIComponent(TRIP);
+  try { await navigator.clipboard.writeText(url); toast('已複製這趟旅程的連結'); } catch (e) { prompt('複製這個連結', url); }
+};
+addEventListener('online', loadAll);
+addEventListener('offline', () => { online = false; setSync(); });
+
+setSync(); render(); loadAll(); subscribe();
+
+/* ===== 離線開啟：Service Worker（需與 index.html 放在同一個資料夾，檔名 sw.js） ===== */
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.ready.then(() => { swReady = true; const v = $('.ver'); if (v) v.textContent = verLine(); }).catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
