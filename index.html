@@ -394,13 +394,25 @@ async function saveRow(t, row) {
   persist(); render();
   if (sb) {
     const saveTheme = async () => { if (t === 'tw_trips') { try { await sb.from('tw_trips').update({ theme: row.theme || null }).eq('id', row.id); } catch (e) {} } };   // 欄位尚未建立時會失敗，忽略即可
-    if (t === 'tw_trips' && i < 0) {                   // 新旅程：由伺服器建立並自動加入成員
-      await ready;
-      const r = await sb.rpc('create_trip', { p_id: row.id, p_name: row.name, p_start: row.start_day, p_end: row.end_day });
-      if (!r.error && r.data) { await saveTheme(); return loadAll(); }
-    }
     const { theme, ...plain } = row;
-    let { error } = await sb.from(t).upsert(t === 'tw_trips' ? plain : { ...row, trip_id: TRIP });
+    if (t === 'tw_trips') {
+      if (i < 0) { // 新旅程：只能透過 RPC 建立並自動加入成員
+        await ready;
+        const r = await sb.rpc('create_trip', { p_id: row.id, p_name: row.name, p_start: row.start_day, p_end: row.end_day });
+        if (r.error || !r.data) {
+          toast('建立旅程失敗：' + (r.error?.message || '伺服器未回傳結果'));
+          return;
+        }
+      } else { // 既有旅程使用 UPDATE，避免觸發 INSERT RLS policy
+        const { error } = await sb.from('tw_trips').update(plain).eq('id', row.id);
+        if (error) toast('儲存失敗：' + error.message);
+        else await saveTheme();
+        return loadAll();
+      }
+    }
+    let { error } = t === 'tw_trips'
+      ? { error: null }
+      : await sb.from(t).upsert({ ...row, trip_id: TRIP });
     if (error && t === 'expenses' && /pay_method/.test(error.message || '')) {   // 資料庫還沒有付款方式欄位：先存其他內容
       const { pay_method, ...rest } = row;
       ({ error } = await sb.from(t).upsert({ ...rest, trip_id: TRIP }));
