@@ -6,7 +6,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>旅行手帳</title>
-<meta name="app-version" content="1.8.0">
+<meta name="app-version" content="1.8.1">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
 :root{--bg:#f5f0de;--card:#fffdf4;--ink:#2b4a47;--mute:#6b8279;--sea:#3a86b8;--sky:#bfe0ef;--sun:#f2b84b;--leaf:#5e9e6e;--line:#d9d3b8;--bad:#c0563f;--onsun:#2b4a47;--onleaf:#fff;--btn:#16283f;--serif:"Hiragino Mincho ProN","Songti TC","Noto Serif TC",serif}
@@ -244,7 +244,7 @@ html[data-theme] .hero::after{content:"";position:absolute;inset:0;pointer-event
 <div id="toast"></div>
 
 <script>
-const APP_VERSION = '1.8.0', APP_DATE = '2026-11-18';   // 每次修改請同步更新這裡與 CHANGELOG.md
+const APP_VERSION = '1.8.1', APP_DATE = '2026-11-19';   // 每次修改請同步更新這裡與 CHANGELOG.md
 /* ===== 設定：填入 Supabase 後即啟用雲端同步；留空則為本機模式 ===== */
 const CONFIG = {
   SUPABASE_URL: 'https://twiujddkkklxozgmggeo.supabase.co',
@@ -595,15 +595,49 @@ const link = u => /^https?:\/\//.test(u || '') ? `<a href="${esc(u)}" target="_b
 /* ===== 附件、航班查詢、地圖連結 ===== */
 const ATT = new Set(['restaurants', 'check_items']);
 const signed = {};
-const fileUrl = p => signed[p] || `${CONFIG.SUPABASE_URL}/storage/v1/object/public/tw-files/${p}`;
+const offlineFileUrl = p => new URL('./__offline_file__/' + encodeURIComponent(p), location.href).href;
+const fileCacheKey = p => 'tw:filecache:' + p;
+const fileUrl = p => {
+  try { if (localStorage.getItem(fileCacheKey(p)) === '1') return offlineFileUrl(p); } catch (e) {}
+  return signed[p] || `${CONFIG.SUPABASE_URL}/storage/v1/object/public/tw-files/${p}`;
+};
+async function cacheAttachment(f) {
+  if (!('caches' in window) || !navigator.onLine || !signed[f.path]) return false;
+  try {
+    const response = await fetch(signed[f.path], { cache: 'no-store' });
+    if (!response.ok || response.type === 'opaque') return false;
+    const cache = await caches.open('travel-journal-files-v1');
+    await cache.put(offlineFileUrl(f.path), response.clone());
+    localStorage.setItem(fileCacheKey(f.path), '1');
+    return true;
+  } catch (e) { return false; }
+}
+function cachedFileOpened(path) {
+  const f = state.tw_files.find(x => x.path === path);
+  if (f) cacheAttachment(f);
+}
+document.addEventListener('load', e => {
+  const img = e.target?.closest?.('img[data-file-cache]');
+  if (img) cachedFileOpened(decodeURIComponent(img.dataset.fileCache));
+}, true);
+document.addEventListener('click', async e => {
+  const a = e.target.closest('a[data-file-cache]');
+  if (!a) return;
+  const path = decodeURIComponent(a.dataset.fileCache || '');
+  const f = state.tw_files.find(x => x.path === path);
+  if (!f) return;
+  e.preventDefault();
+  if (await cacheAttachment(f)) window.open(offlineFileUrl(path), '_blank', 'noopener');
+  else window.open(fileUrl(path), '_blank', 'noopener');
+});
 async function signFiles() {
   if (!sb) return;
   const ps = state.tw_files.map(f => f.path).filter(p => !signed[p]); if (!ps.length) return;
   try { const { data } = await sb.storage.from('tw-files').createSignedUrls(ps, 21600); (data || []).forEach(d => { if (d.signedUrl) signed[d.path] = d.signedUrl; }); } catch (e) {}
 }
 const fileChip = f => /^image\//.test(f.mime || '')
-  ? `<a href="${esc(fileUrl(f.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(fileUrl(f.path))}" alt="${esc(f.name)}"></a>`
-  : `<a class="file" href="${esc(fileUrl(f.path))}" target="_blank" rel="noopener">📄 ${esc(f.name || '檔案')}</a>`;
+  ? `<a data-file-cache="${encodeURIComponent(f.path)}" href="${esc(fileUrl(f.path))}" target="_blank" rel="noopener"><img data-file-cache="${encodeURIComponent(f.path)}" loading="lazy" src="${esc(fileUrl(f.path))}" alt="${esc(f.name)}"></a>`
+  : `<a class="file" data-file-cache="${encodeURIComponent(f.path)}" href="${esc(fileUrl(f.path))}" target="_blank" rel="noopener">📄 ${esc(f.name || '檔案')}</a>`;
 const filesOf = (id, tbl) => state.tw_files.filter(f => f.owner_id === id && (!tbl || f.owner_table === tbl));
 const filesView = id => { const fs = filesOf(id); return fs.length ? `<div class="thumbs">${fs.map(fileChip).join('')}</div>` : ''; };
 const filesHtml = (id, tbl) => { const fs = filesOf(id, tbl); return fs.length ? `<div class="thumbs">${fs.map(f => `<span class="fwrap">${fileChip(f)}<button type="button" class="x" data-rmfile="${f.id}" aria-label="刪除附件">✕</button></span>`).join('')}</div>` : '<div class="sub">尚無附件</div>'; };
