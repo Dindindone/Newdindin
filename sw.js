@@ -1,4 +1,5 @@
-const CACHE_NAME = 'travel-journal-v1.8.0';
+const CACHE_NAME = 'travel-journal-app-v1.8.1';
+const FILE_CACHE = 'travel-journal-files-v1';
 const APP_SHELL = new URL('./index.html', self.registration.scope).href;
 const SUPABASE_CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js';
 
@@ -17,7 +18,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter(key => key.startsWith('travel-journal-') && key !== CACHE_NAME).map(key => caches.delete(key)));
+    await Promise.all(keys.filter(key => key.startsWith('travel-journal-app-') && key !== CACHE_NAME).map(key => caches.delete(key)));
     await self.clients.claim();
   })());
 });
@@ -25,6 +26,19 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   const request = event.request;
   const url = new URL(request.url);
+
+  // Local synthetic URLs are used only for attachments already saved to the device.
+  if (url.origin === self.location.origin && url.pathname.includes('/__offline_file__/')) {
+    event.respondWith((async () => {
+      const cache = await caches.open(FILE_CACHE);
+      return (await cache.match(request)) ||
+        new Response('此附件尚未下載到裝置，請連線後開啟一次。', {
+          status: 404,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        });
+    })());
+    return;
+  }
 
   // Never cache Supabase API, Storage, authentication, or other data requests.
   if (url.origin.includes('supabase.co')) return;
