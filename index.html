@@ -1165,7 +1165,9 @@ function mapSearchQuery(p) {
       q = param || (path ? decodeURIComponent(path[1]).replace(/\+/g,' ') : p.name);
     }
   } catch (_) {}
-  return String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim() || p.name;
+  q = String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim() || p.name;
+  const tripName = curTrip()?.name || '';
+  return tripName && !q.includes(tripName) ? q + ', ' + tripName : q;
 }
 function loadLeaflet() {
   if (window.L) return Promise.resolve();
@@ -1404,7 +1406,7 @@ document.addEventListener('click', e => {
   if (e.target.closest('a')) return;
   const el = e.target.closest('[data-mapfilter],[data-mapfocus],[data-tab],[data-add],[data-edit],[data-go],[data-day],[data-sub],[data-preset],[data-rmfile],[data-trans],[data-tsave],[data-tcancel],[data-fold],[data-foldall],[data-qrpick],[data-qrshow],[data-qrclose],[data-mv],[data-rmit],[data-wxsave],[data-wxedit],[data-wxlive],[data-wxback],[data-catpick],[data-join]'); if (!el) return;
   if (el.dataset.mapfilter) { mapFilter = el.dataset.mapfilter; render(); }
-  else if (el.dataset.mapfocus) { const hit = (window.__tripMapLocated || []).find(x => x.p.id === el.dataset.mapfocus); if (hit && tripMap) { tripMap.setView(hit.xy, Math.max(tripMap.getZoom(),15)); hit.marker.openPopup(); } }
+  else if (el.dataset.mapfocus) { const hit = (window.__tripMapLocated || []).find(x => x.p.id === el.dataset.mapfocus); if (hit && tripMap) { tripMap.setView(hit.xy, Math.max(tripMap.getZoom(),15)); hit.marker.openPopup(); } else { const p = mapPoints().find(x => x.id === el.dataset.mapfocus); if (p) window.open('https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(mapSearchQuery(p)), '_blank', 'noopener'); } }
   else if (el.dataset.go) location.search = '?trip=' + encodeURIComponent(el.dataset.go);
   else if ('day' in el.dataset) { selDay = el.dataset.day; openLeg = null; render(); }
   else if (el.dataset.sub) { infoTab = el.dataset.sub; render(); }
