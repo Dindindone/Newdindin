@@ -3,6 +3,7 @@
 <head>
 <link rel="preconnect" href="https://api.open-meteo.com">
 <link rel="preconnect" href="https://geocoding-api.open-meteo.com">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>旅行手帳</title>
@@ -234,6 +235,11 @@ html[data-theme] .hero::after{content:"";position:absolute;inset:0;pointer-event
 .thg small{display:block;margin:1px 0 7px;font-size:.72rem;line-height:1.35;color:var(--mute)}
 .sw{display:flex;padding-left:4px}
 .sw i{width:20px;height:20px;border-radius:50%;margin-left:-4px;border:2px solid var(--card);box-shadow:0 0 0 1px rgba(0,0,0,.12)}
+
+/* 旅程地圖 */
+.mapfilters{display:flex;gap:7px;overflow-x:auto;padding:4px 0 10px;scrollbar-width:none}.mapfilters button{flex:0 0 auto;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--ink);padding:7px 12px;font:inherit;font-size:.82rem}.mapfilters button.on{background:var(--sun);border-color:var(--sun);color:var(--onsun)}
+#trip-map{height:min(62vh,520px);min-height:330px;border-radius:16px;overflow:hidden;border:1px solid var(--line);z-index:0}.mapstatus{font-size:.82rem;color:var(--mute);margin:7px 2px}.maplist{display:grid;gap:7px;margin-top:12px}.mapitem{display:flex;gap:10px;align-items:center;padding:9px 11px;background:var(--card);border-radius:12px;border:1px solid var(--line)}.mapitem .mi{font-size:1.2rem}.mapitem .mt{flex:1;min-width:0}.mapitem small{display:block;color:var(--mute)}.mapitem button{border:0;background:var(--bg);border-radius:9px;padding:6px 9px;color:var(--sea)}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--card);color:var(--ink)}.leaflet-container{font:14px/1.45 system-ui,sans-serif}
 </style>
 </head>
 <body>
@@ -244,7 +250,7 @@ html[data-theme] .hero::after{content:"";position:absolute;inset:0;pointer-event
 <div id="toast"></div>
 
 <script>
-const APP_VERSION = '1.8.5', APP_DATE = '2026-11-21';   // 每次修改請同步更新這裡與 CHANGELOG.md
+const APP_VERSION = '1.9.0', APP_DATE = '2026-11-21';   // 每次修改請同步更新這裡與 CHANGELOG.md
 /* ===== 設定：填入 Supabase 後即啟用雲端同步；留空則為本機模式 ===== */
 const CONFIG = {
   SUPABASE_URL: 'https://twiujddkkklxozgmggeo.supabase.co',
@@ -312,7 +318,7 @@ const INFO_CATS = ['簽證入境', '保險', '交通票券', '網卡通訊', '�
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const TABLES = ['itinerary', 'flights', 'lodging', 'info', 'members', 'expenses', 'restaurants', 'check_cats', 'check_items', 'tw_files', 'reminders'];
-const TABS = { trip: '首頁', itinerary: '行程', info: '資訊', money: '記帳', members: '成員' };
+const TABS = { trip: '首頁', itinerary: '行程', map: '地圖', info: '資訊', money: '記帳', members: '成員' };
 const TRIP = new URLSearchParams(location.search).get('trip');   // 沒有 = 首頁
 const KEY = 'tw:data:' + TRIP;
 const CONFIGURED = !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_KEY);
@@ -326,6 +332,7 @@ const ready = sb ? (async () => {       // 不需要使用者登入：每支裝�
   } catch (e) { authMsg = String(e); }
 })() : Promise.resolve();
 let online = false, tab = 'trip', wxEdit = false, selDay = null, saving = false, infoTab = 'restaurants', openLeg = null;
+let mapFilter = 'all', tripMap = null, tripMapLayer = null, mapInitToken = 0, leafletPromise = null;
 let trips = JSON.parse(localStorage.getItem('tw:trips') || '[]');
 let state = { itinerary: [], flights: [], lodging: [], info: [], members: [], expenses: [], restaurants: [], check_cats: [], check_items: [], tw_files: [], reminders: [] };
 if (TRIP) try { Object.assign(state, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
@@ -1130,6 +1137,97 @@ function tripDays() {          // 旅程出發日～回程日自動展開，再�
   return [...set].sort();
 }
 
+
+/* ===== 旅程地圖：使用既有行程、住宿、餐廳與景點資料，不新增資料表 ===== */
+const MAP_TYPES = { itinerary: ['🗓️','行程'], lodging: ['🏨','住宿'], restaurants: ['🍽️','餐廳'], attractions: ['📍','景點'] };
+function mapPoints() {
+  const out = [];
+  state.itinerary.forEach(r => { const q = rawPlace(r); if (q) out.push({id:r.id,type:'itinerary',name:r.title || q,query:q,sub:[r.day ? fmtDay(r.day) : '',r.time || '',r.category || ''].filter(Boolean).join(' · ')}); });
+  state.lodging.forEach(r => { const q = r.address || r.name; if (q) out.push({id:r.id,type:'lodging',name:r.name || q,query:q,sub:[r.check_in ? fmtDay(r.check_in) : '',r.check_out ? '退房 '+fmtDay(r.check_out) : ''].filter(Boolean).join(' · '),url:r.url}); });
+  state.restaurants.forEach(r => { const type = r.kind === 'attractions' ? 'attractions' : 'restaurants'; const q = r.map_url || r.name; if (q) out.push({id:r.id,type,name:r.name || q,query:q,sub:r.note || '',url:r.map_url}); });
+  return out;
+}
+function coordsFromMapUrl(url) {
+  if (!url) return null;
+  const s = decodeURIComponent(String(url).replace(/&amp;/g,'&'));
+  let m = s.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
+  if (!m) m = s.match(/[?&](?:q|query|ll)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  return m ? [+m[1], +m[2]] : null;
+}
+function mapSearchQuery(p) {
+  let q = p.query || p.name || '';
+  try { const u = new URL(q); if (/google\./i.test(u.hostname)) q = u.pathname.replace(/\+/g,' ').replace(/^\/maps\/place\//,'').replaceAll('/',' ') || u.searchParams.get('query') || p.name; } catch (_) {}
+  return String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim() || p.name;
+}
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletPromise) return leafletPromise;
+  leafletPromise = new Promise((resolve,reject) => {
+    const sc = document.createElement('script'); sc.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'; sc.onload = resolve; sc.onerror = reject; document.head.appendChild(sc);
+  });
+  return leafletPromise;
+}
+const mapCacheKey = q => 'tw:mapgeo:' + q.toLowerCase().replace(/\s+/g,' ').trim();
+async function locateMapPoint(p) {
+  const direct = coordsFromMapUrl(p.url || p.query);
+  if (direct) return direct;
+  const q = mapSearchQuery(p), key = mapCacheKey(q);
+  try { const saved = JSON.parse(localStorage.getItem(key) || 'null'); if (Array.isArray(saved) && saved.length === 2) return saved; } catch (_) {}
+  const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=' + encodeURIComponent(q);
+  const res = await fetch(url, { headers: { 'Accept':'application/json' } });
+  if (!res.ok) throw new Error('地點搜尋服務暫時無法使用');
+  const rows = await res.json();
+  if (!rows.length) return null;
+  const xy = [+rows[0].lat, +rows[0].lon];
+  try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
+  return xy;
+}
+function mapView() {
+  const filters = [['all','全部'],['itinerary','行程'],['lodging','住宿'],['restaurants','餐廳'],['attractions','景點']];
+  const points = mapPoints(), visible = points.filter(p => mapFilter === 'all' || p.type === mapFilter);
+  return '<div class="legcard"><h2>🗺️ 旅程地圖</h2><div class="mapfilters">' +
+    filters.map(([k,v]) => '<button type="button" data-mapfilter="' + k + '" class="' + (mapFilter === k ? 'on' : '') + '">' + v + '</button>').join('') +
+    '</div><div id="trip-map"></div><div id="map-status" class="mapstatus">正在準備地圖…</div><div id="map-list" class="maplist">' +
+    (visible.length ? visible.map(p => '<div class="mapitem"><span class="mi">' + MAP_TYPES[p.type][0] + '</span><div class="mt"><strong>' + esc(p.name) + '</strong><small>' + MAP_TYPES[p.type][1] + (p.sub ? ' · ' + esc(p.sub) : '') + '</small></div><button type="button" data-mapfocus="' + esc(p.id) + '">定位</button></div>').join('') : '<div class="empty small">目前沒有可顯示的地點。</div>') +
+    '</div><p class="mapstatus">地點依資料中的名稱、地址或 Google 地圖連結定位。首次定位需要網路；成功定位後會快取在這台裝置。</p></div>';
+}
+async function initTripMap() {
+  const el = $('#trip-map'); if (!el || tab !== 'map') return;
+  const token = ++mapInitToken;
+  const status = $('#map-status'), all = mapPoints(), points = all.filter(p => mapFilter === 'all' || p.type === mapFilter);
+  if (!points.length) { status.textContent = '目前沒有可定位的地點。'; return; }
+  try {
+    await loadLeaflet();
+    if (token !== mapInitToken || !$('#trip-map')) return;
+    if (tripMap) { tripMap.remove(); tripMap = null; }
+    tripMap = L.map('trip-map', { scrollWheelZoom:false }).setView([25.033,121.565], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(tripMap);
+    tripMapLayer = L.featureGroup().addTo(tripMap);
+    const located = [], failed = [];
+    for (let i=0; i<points.length; i++) {
+      if (token !== mapInitToken || !$('#trip-map')) return;
+      const p = points[i];
+      status.textContent = '正在定位 ' + (i+1) + '/' + points.length + '：' + p.name;
+      try {
+        const xy = await locateMapPoint(p);
+        if (xy) {
+          const icon = L.divIcon({ className:'', html:'<span style="font-size:25px;text-shadow:0 1px 3px #fff">' + MAP_TYPES[p.type][0] + '</span>', iconSize:[30,30], iconAnchor:[15,15] });
+          const marker = L.marker(xy,{icon}).addTo(tripMapLayer);
+          marker.bindPopup('<strong>' + esc(p.name) + '</strong><br>' + MAP_TYPES[p.type][1] + (p.sub ? '<br>' + esc(p.sub) : '') + '<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(mapSearchQuery(p)) + '">用 Google 地圖導航</a>');
+          located.push({p,marker,xy});
+        } else failed.push(p.name);
+      } catch (_) { failed.push(p.name); }
+      if (i < points.length-1 && !coordsFromMapUrl(p.url || p.query)) await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+    if (token !== mapInitToken) return;
+    if (located.length) { const bounds = tripMapLayer.getBounds(); tripMap.fitBounds(bounds,{padding:[28,28],maxZoom:14}); }
+    status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個地點' + (failed.length ? '；' + failed.length + ' 個未能辨識，可補上更完整地址或 Google 地圖連結。' : '。');
+    window.__tripMapLocated = located;
+    setTimeout(() => tripMap?.invalidateSize(), 100);
+  } catch (_) { status.textContent = '地圖載入失敗，請確認網路連線後重新開啟此頁。'; }
+}
+
 const views = {
   home() {
     const rows = [...trips].sort((a, b) => (a.start_day || '9').localeCompare(b.start_day || '9'));
@@ -1138,6 +1236,7 @@ const views = {
         <div class="tb"><strong>${esc(t.name)}</strong><div class="sub">${range(t)}</div></div></div>`).join('')
         : `<div class="empty">還沒有旅程，按右下角出發吧。</div>`) + `<div class="ver">${verLine()}</div>` + add('tw_trips');
   },
+  map() { return mapView(); },
   itinerary() {
     const days = tripDays(), undated = state.itinerary.some(r => !r.day);
     const tabs = undated ? [...days, ''] : days;
@@ -1292,11 +1391,14 @@ function render() {
   $('.dchip.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
   { const c = $('.wxrow'), e = $('.wxd.trip'); if (c && e) c.scrollLeft = e.offsetLeft - c.offsetLeft - 8; }
   if (TRIP && tab === 'trip') ensureWeather();
+  if (TRIP && tab === 'map') setTimeout(initTripMap, 0);
 }
 document.addEventListener('click', e => {
   if (e.target.closest('a')) return;
-  const el = e.target.closest('[data-tab],[data-add],[data-edit],[data-go],[data-day],[data-sub],[data-preset],[data-rmfile],[data-trans],[data-tsave],[data-tcancel],[data-fold],[data-foldall],[data-qrpick],[data-qrshow],[data-qrclose],[data-mv],[data-rmit],[data-wxsave],[data-wxedit],[data-wxlive],[data-wxback],[data-catpick],[data-join]'); if (!el) return;
-  if (el.dataset.go) location.search = '?trip=' + encodeURIComponent(el.dataset.go);
+  const el = e.target.closest('[data-mapfilter],[data-mapfocus],[data-tab],[data-add],[data-edit],[data-go],[data-day],[data-sub],[data-preset],[data-rmfile],[data-trans],[data-tsave],[data-tcancel],[data-fold],[data-foldall],[data-qrpick],[data-qrshow],[data-qrclose],[data-mv],[data-rmit],[data-wxsave],[data-wxedit],[data-wxlive],[data-wxback],[data-catpick],[data-join]'); if (!el) return;
+  if (el.dataset.mapfilter) { mapFilter = el.dataset.mapfilter; render(); }
+  else if (el.dataset.mapfocus) { const hit = (window.__tripMapLocated || []).find(x => x.p.id === el.dataset.mapfocus); if (hit && tripMap) { tripMap.setView(hit.xy, Math.max(tripMap.getZoom(),15)); hit.marker.openPopup(); } }
+  else if (el.dataset.go) location.search = '?trip=' + encodeURIComponent(el.dataset.go);
   else if ('day' in el.dataset) { selDay = el.dataset.day; openLeg = null; render(); }
   else if (el.dataset.sub) { infoTab = el.dataset.sub; render(); }
   else if (el.dataset.preset) addPreset(el.dataset.preset);
