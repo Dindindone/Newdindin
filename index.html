@@ -1157,7 +1157,14 @@ function coordsFromMapUrl(url) {
 }
 function mapSearchQuery(p) {
   let q = p.query || p.name || '';
-  try { const u = new URL(q); if (/google\./i.test(u.hostname)) q = u.pathname.replace(/\+/g,' ').replace(/^\/maps\/place\//,'').replaceAll('/',' ') || u.searchParams.get('query') || p.name; } catch (_) {}
+  try {
+    const u = new URL(q);
+    if (/google\./i.test(u.hostname)) {
+      const param = u.searchParams.get('query') || u.searchParams.get('q');
+      const path = u.pathname.match(/\/maps\/place\/([^/]+)/);
+      q = param || (path ? decodeURIComponent(path[1]).replace(/\+/g,' ') : p.name);
+    }
+  } catch (_) {}
   return String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim() || p.name;
 }
 function loadLeaflet() {
