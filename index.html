@@ -485,7 +485,7 @@ function fieldHtml([k, type, label], v) {
 function formHtml(t, row) {
   if (t === 'flights') return flightForm(row);
   if (t === 'itinerary') return itineraryForm(row);
-  if (t !== 'expenses') { const fields = t === 'restaurants' ? FORMS[t].fields.map(f => f[0] === 'name' ? [f[0], f[1], row.kind === 'attractions' ? '景點名稱' : '餐廳名稱'] : f) : FORMS[t].fields; return fields.map(f => fieldHtml(f, row[f[0]])).join('') + (t === 'tw_trips' ? paletteHtml(paletteOf(row)) : '') + (t === 'restaurants' ? '<div class="sub" id="mapst"></div>' + catSelect(row.cat_id) : '') + (ATT.has(t) ? attHtml(cur.newId) : ''); }
+  if (t !== 'expenses') { const fields = t === 'restaurants' ? FORMS[t].fields.map(f => f[0] === 'name' ? [f[0], f[1], row.kind === 'attractions' ? '景點名稱' : '餐廳名稱'] : f) : FORMS[t].fields; return fields.map(f => fieldHtml(f, row[f[0]])).join('') + (t === 'tw_trips' ? paletteHtml(paletteOf(row)) : '') + (t === 'restaurants' ? '<div class="sub" id="mapst"></div>' + catSelect(row.cat_id, row.kind) : '') + (ATT.has(t) ? attHtml(cur.newId) : ''); }
   const ccy = row.currency || 'TWD', rate = row.rate ?? DEFAULT_RATES[ccy] ?? 1;
   const split = row.split?.length ? row.split : state.members.map(m => m.id);
   const pays = payersOf(row), ecats = EXP_CATS.concat([...new Set(state.expenses.map(e => e.category).filter(c => c && !EXP_CATS.includes(c)))]);
@@ -978,7 +978,7 @@ const itineraryForm = row => {
     ${row.place && row.place !== row.title ? `<label>地圖搜尋地點（選填，與名稱不同時填）</label><input name="place" value="${esc(row.place)}">` : ''}
     <label>備註 / 必吃必買提醒</label><textarea name="note" rows="2" placeholder="例如：先去4樓買票、必吃抹茶冰">${esc(row.note)}</textarea>`;
 };
-const catSelect = cid => `<label>類別</label><select name="cat_id"><option value="">未分類</option>${state.check_cats.filter(c => c.kind === 'restaurants').map(c => `<option value="${c.id}" ${c.id === cid ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
+const catSelect = (cid, kind = 'restaurants') => `<label>類別</label><select name="cat_id"><option value="">未分類</option>${state.check_cats.filter(c => c.kind === kind).map(c => `<option value="${c.id}" ${c.id === cid ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
 
 /* ===== 旅程首頁：依旅程名稱的主視覺、倒數、天氣 ===== */
 const PAY_METHODS = ['現金', '信用卡', '交通卡', '其它'];
