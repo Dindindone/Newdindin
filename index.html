@@ -1142,7 +1142,7 @@ function tripDays() {          // 旅程出發日～回程日自動展開，再�
 const MAP_TYPES = { itinerary: ['🗓️','行程'], lodging: ['🏨','住宿'], restaurants: ['🍽️','餐廳'], attractions: ['📍','景點'] };
 function isGenericMapLabel(value) {
   const s = String(value || '').trim().toLowerCase().replace(/[\s、，,。·]/g,'');
-  return !s || /^(午餐|晚餐|早餐|午餐下午茶|下午茶|吃飯|用餐|美食|餐廳|飯店|飯店出發|飯店出門|飯店入住|入住|退房|出發|集合|交通|自由活動|休息|待定|未定|待安排|機場接送)$/.test(s);
+  return !s || /^(午餐|晚餐|早餐|午餐下午茶|下午茶|吃飯|用餐|美食|餐廳|飯店|飯店出發|飯店出門|飯店入住|入住|退房|出發|集合|交通|自由活動|休息|待定|未定|待安排|機場接送)$/.test(s) || /(午餐|晚餐|早餐|下午茶|宵夜)$/.test(s);
 }
 function mapPoints() {
   const out = [];
