@@ -1146,12 +1146,15 @@ function isGenericMapLabel(value) {
 }
 function mapPoints() {
   const out = [];
+  let ignored = 0;
   state.itinerary.forEach(r => {
     const q = rawPlace(r), label = r.title || q;
-    if (q && !isGenericMapLabel(q) && !isGenericMapLabel(label)) out.push({id:r.id,type:'itinerary',name:label,query:q,sub:[r.day ? fmtDay(r.day) : '',r.time || '',r.category || ''].filter(Boolean).join(' · ')});
+    if (q && !isGenericMapLabel(q)) out.push({id:r.id,type:'itinerary',name:label,query:q,sub:[r.day ? fmtDay(r.day) : '',r.time || '',r.category || ''].filter(Boolean).join(' · ')});
+    else if (q) ignored++;
   });
-  state.lodging.forEach(r => { const q = r.address || r.name; if (q && !isGenericMapLabel(q)) out.push({id:r.id,type:'lodging',name:r.name || q,query:q,sub:[r.check_in ? fmtDay(r.check_in) : '',r.check_out ? '退房 '+fmtDay(r.check_out) : ''].filter(Boolean).join(' · '),url:r.url}); });
-  state.restaurants.forEach(r => { const type = r.kind === 'attractions' ? 'attractions' : 'restaurants'; const q = r.map_url || r.name; if (q && !isGenericMapLabel(r.name)) out.push({id:r.id,type,name:r.name || q,query:q,sub:r.note || '',url:r.map_url}); });
+  state.lodging.forEach(r => { const q = r.address || r.name; if (q && !isGenericMapLabel(q) && (r.address || r.url || String(q).trim().length > 2)) out.push({id:r.id,type:'lodging',name:r.name || q,query:q,sub:[r.check_in ? fmtDay(r.check_in) : '',r.check_out ? '退房 '+fmtDay(r.check_out) : ''].filter(Boolean).join(' · '),url:r.url}); else if (q) ignored++; });
+  state.restaurants.forEach(r => { const type = r.kind === 'attractions' ? 'attractions' : 'restaurants'; const q = r.map_url || r.name; if (q && !isGenericMapLabel(r.name)) out.push({id:r.id,type,name:r.name || q,query:q,sub:r.note || '',url:r.map_url}); else if (q) ignored++; });
+  window.__mapIgnoredCount = ignored;
   return out;
 }
 function coordsFromMapUrl(url) {
@@ -1270,7 +1273,7 @@ async function initTripMap() {
     if (token !== mapInitToken) return;
     if (located.length) { const bounds = tripMapLayer.getBounds(); tripMap.fitBounds(bounds,{padding:[28,28],maxZoom:14}); }
     status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個具體地點' +
-      (all.length - points.length ? '；另略過 ' + (all.length - points.length) + ' 筆沒有具體地點名稱的行程' : '') +
+      (window.__mapIgnoredCount ? '；另略過 ' + window.__mapIgnoredCount + ' 筆沒有具體地點的資料' : '') +
       (failed.length ? '；' + failed.length + ' 個查無結果' : '') +
       (serviceErrors.length ? '；' + serviceErrors.length + ' 個搜尋服務連線失敗' : '') +
       (failed.length || serviceErrors.length ? '。請補上完整地址或 Google 地圖連結。' : '。');
