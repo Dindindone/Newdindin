@@ -1154,7 +1154,6 @@ function coordsFromMapUrl(url) {
   let m = s.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
   if (!m) m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
   if (!m) m = s.match(/[?&](?:q|query|ll|destination)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
-  if (!m) m = s.match(/!2d(-?\d+(?:\.\d+)?)!3d(-?\d+(?:\.\d+)?)/);
   if (!m) return null;
   const lat = +m[1], lon = +m[2];
   return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? [lat,lon] : null;
@@ -1195,7 +1194,7 @@ async function locateMapPoint(p) {
   } catch (_) {}
 
   // 先用 OpenStreetMap 搜尋景點/地址；沒有結果或服務異常時再以 Open-Meteo 地名庫補查。
-  let serviceError = null;
+  let serviceFailures = 0;
   try {
     const rows = await getJSON('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=zh-TW&q=' + encodeURIComponent(q), 8000);
     if (rows?.length) {
@@ -1205,7 +1204,7 @@ async function locateMapPoint(p) {
         return xy;
       }
     }
-  } catch (e) { serviceError = e; }
+  } catch (e) { serviceFailures++; }
 
   try {
     const data = await getJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&format=json&name=' + encodeURIComponent(q), 7000);
@@ -1215,8 +1214,8 @@ async function locateMapPoint(p) {
       try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
       return xy;
     }
-  } catch (e) { serviceError = serviceError || e; }
-  if (serviceError) throw new Error('地點搜尋服務連線失敗');
+  } catch (e) { serviceFailures++; }
+  if (serviceFailures === 2) throw new Error('地點搜尋服務連線失敗');
   return null;
 }
 function mapView() {
