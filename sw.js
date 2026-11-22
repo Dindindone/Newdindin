@@ -1,4 +1,4 @@
-const CACHE_NAME = 'travel-journal-app-v1.9.1';
+const CACHE_NAME = 'travel-journal-app-v1.9.2';
 const FILE_CACHE = 'travel-journal-files-v1';
 const APP_SHELL = new URL('./index.html', self.registration.scope).href;
 const SUPABASE_CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js';
