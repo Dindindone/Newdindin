@@ -7,7 +7,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>旅行手帳</title>
-<meta name="app-version" content="1.9.1">
+<meta name="app-version" content="1.9.2">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
 :root{--bg:#f5f0de;--card:#fffdf4;--ink:#2b4a47;--mute:#6b8279;--sea:#3a86b8;--sky:#bfe0ef;--sun:#f2b84b;--leaf:#5e9e6e;--line:#d9d3b8;--bad:#c0563f;--onsun:#2b4a47;--onleaf:#fff;--btn:#16283f;--serif:"Hiragino Mincho ProN","Songti TC","Noto Serif TC",serif}
@@ -250,7 +250,7 @@ html[data-theme] .hero::after{content:"";position:absolute;inset:0;pointer-event
 <div id="toast"></div>
 
 <script>
-const APP_VERSION = '1.9.1', APP_DATE = '2026-11-22';   // 每次修改請同步更新這裡與 CHANGELOG.md
+const APP_VERSION = '1.9.2', APP_DATE = '2026-11-22';   // 每次修改請同步更新這裡與 CHANGELOG.md
 /* ===== 設定：填入 Supabase 後即啟用雲端同步；留空則為本機模式 ===== */
 const CONFIG = {
   SUPABASE_URL: 'https://twiujddkkklxozgmggeo.supabase.co',
@@ -1140,11 +1140,18 @@ function tripDays() {          // 旅程出發日～回程日自動展開，再�
 
 /* ===== 旅程地圖：使用既有行程、住宿、餐廳與景點資料，不新增資料表 ===== */
 const MAP_TYPES = { itinerary: ['🗓️','行程'], lodging: ['🏨','住宿'], restaurants: ['🍽️','餐廳'], attractions: ['📍','景點'] };
+function isGenericMapLabel(value) {
+  const s = String(value || '').trim().toLowerCase().replace(/[\s、，,。·]/g,'');
+  return !s || /^(午餐|晚餐|早餐|午餐下午茶|下午茶|吃飯|用餐|美食|餐廳|飯店|飯店出發|飯店出門|飯店入住|入住|退房|出發|集合|交通|自由活動|休息|待定|未定|待安排|機場接送)$/.test(s);
+}
 function mapPoints() {
   const out = [];
-  state.itinerary.forEach(r => { const q = rawPlace(r); if (q) out.push({id:r.id,type:'itinerary',name:r.title || q,query:q,sub:[r.day ? fmtDay(r.day) : '',r.time || '',r.category || ''].filter(Boolean).join(' · ')}); });
-  state.lodging.forEach(r => { const q = r.address || r.name; if (q) out.push({id:r.id,type:'lodging',name:r.name || q,query:q,sub:[r.check_in ? fmtDay(r.check_in) : '',r.check_out ? '退房 '+fmtDay(r.check_out) : ''].filter(Boolean).join(' · '),url:r.url}); });
-  state.restaurants.forEach(r => { const type = r.kind === 'attractions' ? 'attractions' : 'restaurants'; const q = r.map_url || r.name; if (q) out.push({id:r.id,type,name:r.name || q,query:q,sub:r.note || '',url:r.map_url}); });
+  state.itinerary.forEach(r => {
+    const q = rawPlace(r), label = r.title || q;
+    if (q && !isGenericMapLabel(q) && !isGenericMapLabel(label)) out.push({id:r.id,type:'itinerary',name:label,query:q,sub:[r.day ? fmtDay(r.day) : '',r.time || '',r.category || ''].filter(Boolean).join(' · ')});
+  });
+  state.lodging.forEach(r => { const q = r.address || r.name; if (q && !isGenericMapLabel(q)) out.push({id:r.id,type:'lodging',name:r.name || q,query:q,sub:[r.check_in ? fmtDay(r.check_in) : '',r.check_out ? '退房 '+fmtDay(r.check_out) : ''].filter(Boolean).join(' · '),url:r.url}); });
+  state.restaurants.forEach(r => { const type = r.kind === 'attractions' ? 'attractions' : 'restaurants'; const q = r.map_url || r.name; if (q && !isGenericMapLabel(r.name)) out.push({id:r.id,type,name:r.name || q,query:q,sub:r.note || '',url:r.map_url}); });
   return out;
 }
 function coordsFromMapUrl(url) {
@@ -1181,42 +1188,47 @@ function loadLeaflet() {
   });
   return leafletPromise;
 }
-const mapCacheKey = q => 'tw:mapgeo:' + q.toLowerCase().replace(/\s+/g,' ').trim();
+const mapCacheKey = q => 'tw:mapgeo:v2:' + q.toLowerCase().replace(/\s+/g,' ').trim();
+function mapGeoContext() {
+  const t = curTrip() || {}, n = String(t.name || ''), d = String(t.dest || '');
+  if (/北海道|札幌|小樽|函館|旭川|千歲|新千歲/.test(n + d)) return {country:'jp',suffix:'北海道 日本'};
+  if (/日本|東京|大阪|京都|名古屋|福岡|沖繩|仙台|長野|青森/.test(n + d)) return {country:'jp',suffix:'日本'};
+  return {country:'',suffix:d};
+}
 async function locateMapPoint(p) {
   const direct = coordsFromMapUrl(p.url || p.query);
   if (direct) return direct;
-  const q = mapSearchQuery(p);
-  if (!q || q.length < 2) return null;
+  const name = mapSearchQuery(p);
+  if (!name || name.length < 2 || isGenericMapLabel(name)) return null;
+  const context = mapGeoContext();
+  const q = [name, context.suffix].filter(Boolean).join(', ');
   const key = mapCacheKey(q);
   try {
     const saved = JSON.parse(localStorage.getItem(key) || 'null');
     if (Array.isArray(saved) && saved.length === 2 && saved.every(Number.isFinite)) return saved;
   } catch (_) {}
-
-  // 先用 OpenStreetMap 搜尋景點/地址；沒有結果或服務異常時再以 Open-Meteo 地名庫補查。
-  let serviceFailures = 0;
-  try {
-    const rows = await getJSON('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=zh-TW&q=' + encodeURIComponent(q), 8000);
-    if (rows?.length) {
-      const xy = [+rows[0].lat, +rows[0].lon];
-      if (xy.every(Number.isFinite)) {
-        try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
-        return xy;
-      }
-    }
-  } catch (e) { serviceFailures++; }
-
-  try {
-    const data = await getJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&format=json&name=' + encodeURIComponent(q), 7000);
-    const r = data?.results?.[0];
-    if (r && Number.isFinite(+r.latitude) && Number.isFinite(+r.longitude)) {
-      const xy = [+r.latitude, +r.longitude];
-      try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
-      return xy;
-    }
-  } catch (e) { serviceFailures++; }
-  if (serviceFailures === 2) throw new Error('地點搜尋服務連線失敗');
-  return null;
+  // 僅採用指定國家的地點/地址結果，不再用城市中心點冒充景點座標。
+  const params = new URLSearchParams({format:'jsonv2',limit:'5',addressdetails:'1','accept-language':'ja',q});
+  if (context.country) params.set('countrycodes',context.country);
+  let rows;
+  try { rows = await getJSON('https://nominatim.openstreetmap.org/search?' + params.toString(), 9000); }
+  catch (_) { throw new Error('地點搜尋服務連線失敗'); }
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const candidates = rows.filter(r => !context.country || String(r.address?.country_code || '').toLowerCase() === context.country);
+  if (!candidates.length) return null;
+  const needle = name.toLowerCase().replace(/[\s、，,。·]/g,'');
+  const score = r => {
+    const label = String(r.display_name || '').toLowerCase().replace(/[\s、，,。·]/g,'');
+    const exact = label.includes(needle) ? 100 : 0;
+    const importance = Number(r.importance || 0) * 10;
+    const specific = /^(restaurant|cafe|hotel|museum|station|viewpoint|tourism|building|amenity|shop)$/i.test(String(r.type || '')) ? 8 : 0;
+    return exact + importance + specific;
+  };
+  candidates.sort((a,b) => score(b)-score(a));
+  const best = candidates[0], xy = [+best.lat,+best.lon];
+  if (!xy.every(Number.isFinite) || Math.abs(xy[0]) > 90 || Math.abs(xy[1]) > 180) return null;
+  try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
+  return xy;
 }
 function mapView() {
   const filters = [['all','全部'],['itinerary','行程'],['lodging','住宿'],['restaurants','餐廳'],['attractions','景點']];
@@ -1257,10 +1269,11 @@ async function initTripMap() {
     }
     if (token !== mapInitToken) return;
     if (located.length) { const bounds = tripMapLayer.getBounds(); tripMap.fitBounds(bounds,{padding:[28,28],maxZoom:14}); }
-    status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個地點' +
+    status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個具體地點' +
+      (all.length - points.length ? '；另略過 ' + (all.length - points.length) + ' 筆沒有具體地點名稱的行程' : '') +
       (failed.length ? '；' + failed.length + ' 個查無結果' : '') +
       (serviceErrors.length ? '；' + serviceErrors.length + ' 個搜尋服務連線失敗' : '') +
-      (failed.length || serviceErrors.length ? '。請優先補上城市／區域＋地點名稱，或 Google 地圖完整連結。' : '。');
+      (failed.length || serviceErrors.length ? '。請補上完整地址或 Google 地圖連結。' : '。');
     window.__tripMapLocated = located;
     setTimeout(() => tripMap?.invalidateSize(), 100);
   } catch (_) { status.textContent = '地圖載入失敗，請確認網路連線後重新開啟此頁。'; }
