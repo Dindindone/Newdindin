@@ -7,7 +7,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>旅行手帳</title>
-<meta name="app-version" content="1.8.5">
+<meta name="app-version" content="1.9.1">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <style>
 :root{--bg:#f5f0de;--card:#fffdf4;--ink:#2b4a47;--mute:#6b8279;--sea:#3a86b8;--sky:#bfe0ef;--sun:#f2b84b;--leaf:#5e9e6e;--line:#d9d3b8;--bad:#c0563f;--onsun:#2b4a47;--onleaf:#fff;--btn:#16283f;--serif:"Hiragino Mincho ProN","Songti TC","Noto Serif TC",serif}
@@ -250,7 +250,7 @@ html[data-theme] .hero::after{content:"";position:absolute;inset:0;pointer-event
 <div id="toast"></div>
 
 <script>
-const APP_VERSION = '1.9.0', APP_DATE = '2026-11-21';   // 每次修改請同步更新這裡與 CHANGELOG.md
+const APP_VERSION = '1.9.1', APP_DATE = '2026-11-22';   // 每次修改請同步更新這裡與 CHANGELOG.md
 /* ===== 設定：填入 Supabase 後即啟用雲端同步；留空則為本機模式 ===== */
 const CONFIG = {
   SUPABASE_URL: 'https://twiujddkkklxozgmggeo.supabase.co',
@@ -1149,25 +1149,30 @@ function mapPoints() {
 }
 function coordsFromMapUrl(url) {
   if (!url) return null;
-  const s = decodeURIComponent(String(url).replace(/&amp;/g,'&'));
+  let s = String(url).replace(/&amp;/g,'&');
+  try { s = decodeURIComponent(s); } catch (_) {}
   let m = s.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
   if (!m) m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
-  if (!m) m = s.match(/[?&](?:q|query|ll)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
-  return m ? [+m[1], +m[2]] : null;
+  if (!m) m = s.match(/[?&](?:q|query|ll|destination)=(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) m = s.match(/!2d(-?\d+(?:\.\d+)?)!3d(-?\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const lat = +m[1], lon = +m[2];
+  return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? [lat,lon] : null;
 }
 function mapSearchQuery(p) {
   let q = p.query || p.name || '';
   try {
     const u = new URL(q);
     if (/google\./i.test(u.hostname)) {
-      const param = u.searchParams.get('query') || u.searchParams.get('q');
-      const path = u.pathname.match(/\/maps\/place\/([^/]+)/);
+      const param = u.searchParams.get('query') || u.searchParams.get('q') || u.searchParams.get('destination');
+      const path = u.pathname.match(/\/maps\/(?:place|search)\/([^/]+)/);
       q = param || (path ? decodeURIComponent(path[1]).replace(/\+/g,' ') : p.name);
     }
   } catch (_) {}
-  q = String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim() || p.name;
-  const tripName = curTrip()?.name || '';
-  return tripName && !q.includes(tripName) ? q + ', ' + tripName : q;
+  q = String(q).replace(/https?:\/\/\S+/g,'').replace(/[|]/g,' ').trim();
+  // 短網址無法直接在瀏覽器端展開時，改用資料中原本的地點名稱。
+  if (!q || /^https?:\/\//i.test(q)) q = p.name || '';
+  return q.replace(/\s+/g,' ').trim();
 }
 function loadLeaflet() {
   if (window.L) return Promise.resolve();
@@ -1181,16 +1186,38 @@ const mapCacheKey = q => 'tw:mapgeo:' + q.toLowerCase().replace(/\s+/g,' ').trim
 async function locateMapPoint(p) {
   const direct = coordsFromMapUrl(p.url || p.query);
   if (direct) return direct;
-  const q = mapSearchQuery(p), key = mapCacheKey(q);
-  try { const saved = JSON.parse(localStorage.getItem(key) || 'null'); if (Array.isArray(saved) && saved.length === 2) return saved; } catch (_) {}
-  const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=' + encodeURIComponent(q);
-  const res = await fetch(url, { headers: { 'Accept':'application/json' } });
-  if (!res.ok) throw new Error('地點搜尋服務暫時無法使用');
-  const rows = await res.json();
-  if (!rows.length) return null;
-  const xy = [+rows[0].lat, +rows[0].lon];
-  try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
-  return xy;
+  const q = mapSearchQuery(p);
+  if (!q || q.length < 2) return null;
+  const key = mapCacheKey(q);
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || 'null');
+    if (Array.isArray(saved) && saved.length === 2 && saved.every(Number.isFinite)) return saved;
+  } catch (_) {}
+
+  // 先用 OpenStreetMap 搜尋景點/地址；沒有結果或服務異常時再以 Open-Meteo 地名庫補查。
+  let serviceError = null;
+  try {
+    const rows = await getJSON('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=zh-TW&q=' + encodeURIComponent(q), 8000);
+    if (rows?.length) {
+      const xy = [+rows[0].lat, +rows[0].lon];
+      if (xy.every(Number.isFinite)) {
+        try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
+        return xy;
+      }
+    }
+  } catch (e) { serviceError = e; }
+
+  try {
+    const data = await getJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&format=json&name=' + encodeURIComponent(q), 7000);
+    const r = data?.results?.[0];
+    if (r && Number.isFinite(+r.latitude) && Number.isFinite(+r.longitude)) {
+      const xy = [+r.latitude, +r.longitude];
+      try { localStorage.setItem(key, JSON.stringify(xy)); } catch (_) {}
+      return xy;
+    }
+  } catch (e) { serviceError = serviceError || e; }
+  if (serviceError) throw new Error('地點搜尋服務連線失敗');
+  return null;
 }
 function mapView() {
   const filters = [['all','全部'],['itinerary','行程'],['lodging','住宿'],['restaurants','餐廳'],['attractions','景點']];
@@ -1213,7 +1240,7 @@ async function initTripMap() {
     tripMap = L.map('trip-map', { scrollWheelZoom:false }).setView([25.033,121.565], 5);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(tripMap);
     tripMapLayer = L.featureGroup().addTo(tripMap);
-    const located = [], failed = [];
+    const located = [], failed = [], serviceErrors = [];
     for (let i=0; i<points.length; i++) {
       if (token !== mapInitToken || !$('#trip-map')) return;
       const p = points[i];
@@ -1226,12 +1253,15 @@ async function initTripMap() {
           marker.bindPopup('<strong>' + esc(p.name) + '</strong><br>' + MAP_TYPES[p.type][1] + (p.sub ? '<br>' + esc(p.sub) : '') + '<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(mapSearchQuery(p)) + '">用 Google 地圖導航</a>');
           located.push({p,marker,xy});
         } else failed.push(p.name);
-      } catch (_) { failed.push(p.name); }
+      } catch (e) { serviceErrors.push(p.name); }
       if (i < points.length-1 && !coordsFromMapUrl(p.url || p.query)) await new Promise(resolve => setTimeout(resolve, 1100));
     }
     if (token !== mapInitToken) return;
     if (located.length) { const bounds = tripMapLayer.getBounds(); tripMap.fitBounds(bounds,{padding:[28,28],maxZoom:14}); }
-    status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個地點' + (failed.length ? '；' + failed.length + ' 個未能辨識，可補上更完整地址或 Google 地圖連結。' : '。');
+    status.textContent = '已定位 ' + located.length + ' / ' + points.length + ' 個地點' +
+      (failed.length ? '；' + failed.length + ' 個查無結果' : '') +
+      (serviceErrors.length ? '；' + serviceErrors.length + ' 個搜尋服務連線失敗' : '') +
+      (failed.length || serviceErrors.length ? '。請優先補上城市／區域＋地點名稱，或 Google 地圖完整連結。' : '。');
     window.__tripMapLocated = located;
     setTimeout(() => tripMap?.invalidateSize(), 100);
   } catch (_) { status.textContent = '地圖載入失敗，請確認網路連線後重新開啟此頁。'; }
